@@ -1,6 +1,6 @@
 #include <sys/stat.h>
-typedef (void*)
-int walk_through(const char * path,)
+typedef (void*) (* walk_through_t)(void*arg);
+int walk_through(const char * path,walk_through_t func)
 {
 	DIR* dir=opendir(path);
 	struct dirent* dentry;
