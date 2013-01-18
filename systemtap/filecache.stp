@@ -1,0 +1,94 @@
+#!/usr/bin/stap -g
+%{
+#include <linux/smp.h>
+#include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/file.h>
+typedef long (*do_sys_open_t)(int dfd, const char __user *filename, int flags, int mode);
+typedef struct file *(*fget_light_t)(unsigned int fd, int *fput_needed);
+%}
+function current_cpu_id(page:long)
+%{
+	struct page* page=(struct page*)THIS->page;
+	printk(KERN_INFO"curr: %s,cpu_id= %d,zid= %d,pgflags= %lx,page->index= %ld\n",current->comm,smp_processor_id(),page_to_nid(page),page->flags,page->index);
+%}
+
+function pgflags(path:string)
+%{
+	struct file* file;
+	struct file* fout;
+	int fd=0;
+	int fput_needed;
+	ssize_t ret = -EBADF;
+	pgoff_t start_index;
+	pgoff_t end_index;
+	pgoff_t index;
+	struct address_space *mapping;
+	unsigned long idx;
+	loff_t isize;
+	char* filename= THIS->path;
+	char* foutname=__getname();
+	char* tmp=NULL;
+
+	if(!filename || !foutname)
+		goto outside;
+	strcpy(foutname,filename);
+	strcat(foutname,".filecache");
+	file = filp_open(filename,O_RDONLY|O_LARGEFILE,0666);
+	fout = filp_open(foutname,O_RDWR|O_LARGEFILE|O_CREAT|O_TRUNC,0666);
+	if(IS_ERR(file) || IS_ERR(fout))
+	{
+		printk(KERN_INFO"file open error,file= %p,fout= %p\n",file,fout);
+		goto file_open_out;
+	}
+	mapping=file->f_mapping;
+	idx=0;
+	isize = i_size_read(mapping->host);
+	start_index = 0;
+	end_index = ( isize + PAGE_SIZE -1) >> PAGE_SHIFT;
+	tmp= kmalloc(1024,GFP_KERNEL);
+	if(!tmp)
+	{
+		printk(KERN_INFO"kmalloc error\n");
+		goto file_open_out;
+	}
+	for(index=start_index; index < end_index;index++)
+	{
+		int n;
+		struct page* page=find_get_page(mapping,index);
+		if(page)
+		{
+			//n=sprintf(tmp,"0x%p %ld 0x%lx %d %d 0x%p\n",page,index,page->flags,page_count(page),page_mapcount(page),page->mapping);
+			n=sprintf(tmp,"%ld 0x%lx\n",index,page->flags);
+			page_cache_release(page);
+		}
+		else
+		{
+			n=0;
+			//n=sprintf(tmp,"%ld 0x%lx\n",index,(long)-1);
+		}
+		if(n>0)
+		{
+			mm_segment_t old_fs=get_fs();
+			set_fs(get_ds());
+			vfs_write(fout,tmp,n,&(fout->f_pos));
+			set_fs(old_fs);
+		}
+	}
+file_open_out:
+	if(!IS_ERR(file))
+		filp_close(file,NULL);
+	if(!IS_ERR(fout))
+		filp_close(fout,NULL);
+	if(tmp)
+		kfree(tmp);
+outside:
+	return;
+%}
+probe begin
+{
+	printf("probe begin\n");
+	pgflags(argv[1]);
+	printf("probe end,filename= %s\n",argv[1]);
+	exit();
+}
